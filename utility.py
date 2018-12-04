@@ -153,7 +153,6 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
     fileThread.start()
     # fileThread.join()
 
-
     while True:
         data,addr = recv_sock.recvfrom(1024)
         packet = bits2dict(data)
@@ -162,14 +161,10 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
         total_num += 1
 
         # 随机丢包
-        # if random.random()>0.8:
-        #     total_num -= 1
-        #     print("接收方丢弃数据包，序号为: ",packet["SEQ_NUM"]*config.MSS)
-        #     continue
-        # if packet["SEQ_NUM"] % 5 == 0:
-        #     total_num -= 1
-        #     print("接收方丢弃数据包，序号为: ",packet["SEQ_NUM"]*config.MSS)
-        #     continue
+        if random.random()>0.95:
+            total_num -= 1
+            print("接收方丢弃数据包，序号为: ",packet["SEQ_NUM"]*config.MSS)
+            continue
 
         # 如果收到FIN包，则终止
         if packet["FIN"] == b'1':

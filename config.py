@@ -15,7 +15,7 @@ OPERATION = "lget"
 FILENAME = "test.txt"
 
 # 客户端缓存大小
-RecvBuffer = 200
+RecvBuffer = 500
 # 服务端缓存大小
 SER_RECV_BUF = 200
 

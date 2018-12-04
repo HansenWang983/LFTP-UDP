@@ -7,6 +7,8 @@ import threading
 import time
 import queue
 from collections import deque
+import random
+import config
 
 def int2bits(value,length):
     return bytes(bin(value)[2:].zfill(length),encoding='utf-8')
@@ -89,8 +91,8 @@ def bits2dict(bitstream):
     return dict
 
 
-# 硬盘每0.5s进行一次写操作
-FileWriteInterval = 0.5
+# 硬盘写操作时间间隔
+FileWriteInterval = config.FileWriteInterval
 # 写文件线程：d为接收数据缓存，timeQueue为空的时间队列
 def fileWriter(filename,d,timeQueue,shaVar):
 
@@ -138,7 +140,10 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
     start_time = time.time()
     # 传输文件大小
     total_length = 0
-    
+    # 总共收到的包
+    total_num = 0
+    # 收到正确的包
+    total_ack = 0
     # 控制写入文件速度
     # 写文件线程
     # d为共享的接收数据缓存队列
@@ -153,22 +158,31 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
         data,addr = recv_sock.recvfrom(1024)
         packet = bits2dict(data)
         # 显示收到的seq_num
-        print("收到的字节序号",packet["SEQ_NUM"]*500)
-        #随机丢包
-        '''
-        if random.random()>0.8:
-            #print("Drop packet")
-            continue
-        '''
+        print("接收方收到的字节序号",packet["SEQ_NUM"]*config.MSS)
+        total_num += 1
+
+        # 随机丢包
+        # if random.random()>0.8:
+        #     total_num -= 1
+        #     print("接收方丢弃数据包，序号为: ",packet["SEQ_NUM"]*config.MSS)
+        #     continue
+        # if packet["SEQ_NUM"] % 5 == 0:
+        #     total_num -= 1
+        #     print("接收方丢弃数据包，序号为: ",packet["SEQ_NUM"]*config.MSS)
+        #     continue
+
         # 如果收到FIN包，则终止
         if packet["FIN"] == b'1':
             print("收到 FIN, 文件接收端关闭.")
+            total_ack += 1
             break
 
         # 按顺序得到
         elif packet["SEQ_NUM"] == expectedSeqValue:
-            # print("Receive packet with correct seq value:",expectedSeqValue*500)
-            print("收到正确的数据包，字节序号为",expectedSeqValue*500)
+            # print("Receive packet with correct seq value:",expectedSeqValue*config.MSS)
+            print("收到正确的数据包，字节序号为",expectedSeqValue*config.MSS)
+            # print("接收方当前缓存大小: ",RcvBuffer - (LastByteRcvd-shaVar["LastByteRead"]))
+            total_ack += 1
             # 更新确认序号
             LastByteRcvd = packet["SEQ_NUM"]
             # 加入缓存用于文件写入
@@ -176,7 +190,6 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
             # print(packet["DATA"])
             # 更新总长度
             total_length += len(packet["DATA"])
-            # print(RcvBuffer - (LastByteRcvd-shaVar["LastByteRead"]))
             # 返回ack和接收缓存大小
             recv_sock.sendto(dict2bits({"ACK_NUM":expectedSeqValue,"ACK":b'1',"recvWindow":RcvBuffer - (LastByteRcvd-shaVar["LastByteRead"])}),ser_recv_addr)
             # 期望值+1
@@ -184,7 +197,7 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
 
         #收到了不对的包，则返回expectedSeqValue-1，表示在这之前的都收到了
         else:
-            print("期待得到的字节序号 ",expectedSeqValue*500," 实际收到: ",packet["SEQ_NUM"]*500," 发送ack序号为: ",(expectedSeqValue-1)*500,"到发送端: ",ser_recv_addr)
+            print("期待得到的字节序号 ",expectedSeqValue*config.MSS," 实际收到: ",packet["SEQ_NUM"]*config.MSS," 发送ack序号为: ",(expectedSeqValue-1)*config.MSS)
             recv_sock.sendto(dict2bits({"ACK_NUM":expectedSeqValue-1,"ACK":b'1',"recvWindow":RcvBuffer - (LastByteRcvd-shaVar["LastByteRead"])}),ser_recv_addr)
 
     # 跳出循环
@@ -192,6 +205,9 @@ def fileReceiver(port,ser_recv_addr,filename,RcvBuffer):
     end_time = time.time()
     total_length/=1024
     total_length/=(end_time-start_time)
+    print("正确收到的数据包数量为: ",total_ack)
+    print("收到所有的数据包的数量为: ",total_num)
+    print("正确的接收率: ",total_ack/total_num)
     print("文件传输速度为: ",total_length,"KB/s")
 
 # 发送方接收ack线程
@@ -201,6 +217,7 @@ def TransferReceiver(port,receiveQueue):
 
     receiverSocket = socket(AF_INET,SOCK_DGRAM)
     receiverSocket.bind(('',port))
+    print("发送方的接收端口为: ",port)
 
     while True:
         data,addr = receiverSocket.recvfrom(1024)
@@ -208,7 +225,7 @@ def TransferReceiver(port,receiveQueue):
         packet = bits2dict(data)
         # 加入ack队列
         receiveQueue.put(packet)
-        print("发送端收到ack序号为: ",packet["ACK_NUM"]*500)
+        print("发送端收到ack序号为: ",packet["ACK_NUM"]*config.MSS)
         # print("receiver window size:",packet["recvWindow"])
 
     receiverSocket.close()
@@ -226,13 +243,13 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
 
     ### 初始化
     # 发送报文数据字段最大字节长度
-    MSS = 500
+    MSS = config.MSS
     # 发送方最大等待时延
-    senderTimeoutValue = 0.5
+    senderTimeoutValue = config.senderTimeoutValue
     # 拥塞窗口大小
-    cwnd = 1
+    cwnd = config.cwnd
     # 慢启动阈值
-    ssthresh = 500
+    ssthresh = config.ssthresh
     # 重复ACK计数
     dupACKcount = 0
     # 最早没发送的
@@ -283,6 +300,8 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                     sendContinue = False
                     break
                 # 发送缓存(base,base+N),用于重传 
+                # print("当前rwnd的大小：",rwnd)
+                # print("当前cwnd的大小：",cwnd)
                 cache[nextseqnum] = dict2bits({"SEQ_NUM":nextseqnum,"DATA":data})
                 send_sock.sendto(cache[nextseqnum],cli_addr)
                 nextseqnum += 1
@@ -331,7 +350,7 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                                 cwnd += 1
                             # 到达阈值线性增长
                             if cwnd >= ssthresh and congestionState == 1:
-                                cwnd == ssthresh
+                                cwnd = ssthresh
                                 congestionState = 2
                         ClientBlock = False
                         break
@@ -346,12 +365,14 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                         cwnd = ssthresh + 3
                         dupACKcount = 0
                         congestionState = 2
-                        print("收到3次冗余的ACK",previousACK*500," ,进行重传!")
+                        print("收到3次冗余的ACK",previousACK*config.MSS," ,进行重传!")
+                        print("阈值更新为: ",ssthresh)
+                        print("cwnd窗口大小更新为: ",cwnd)
                         # 进入重传
                         for i in range(base,nextseqnum):
                             packet = cache[i]
                             send_sock.sendto(cache[i],cli_addr)
-                            print("重传的字节序号为: ",bits2dict(packet)["SEQ_NUM"]*500)
+                            print("重传的字节序号为: ",bits2dict(packet)["SEQ_NUM"]*config.MSS)
                     continue
                 
                 # 没收到响应的ack
@@ -365,27 +386,53 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                     for i in range(base,nextseqnum):
                         packet = cache[i]
                         send_sock.sendto(cache[i],cli_addr)
-                        # print("Resend packet SEQ:",bits2dict(packet)["SEQ_NUM"]*500)
-                        print("重传的字节序号为: ",bits2dict(packet)["SEQ_NUM"]*500)
+                        # print("Resend packet SEQ:",bits2dict(packet)["SEQ_NUM"]*config.MSS)
+                        print("重传的字节序号为: ",bits2dict(packet)["SEQ_NUM"]*config.MSS)
 
                     congestionState = 1
                     ssthresh = int(cwnd)/2
                     if ssthresh<=0:
                         ssthresh = 1
                     cwnd = 1
+                    print("阈值更新为: ",ssthresh)
+                    print("cwnd窗口大小更新为: ",cwnd)
         
-            # 超过rwnd大小引起的超时
-            except queue.Empty:  
+            # 超时
+            except queue.Empty: 
+                # 没收到响应的ack
+                if not ClientBlock:
+                    # print("Time out and output current sequence number",base)
+                    print("超时,当前base为: ",base)
+                    # 重启计时器
+                    GBNtimer = time.time()
+                    # 重传base到nextseqnum
+                    for i in range(base,nextseqnum):
+                        packet = cache[i]
+                        send_sock.sendto(cache[i],cli_addr)
+                        # print("Resend packet SEQ:",bits2dict(packet)["SEQ_NUM"]*config.MSS)
+                        print("重传的字节序号为: ",bits2dict(packet)["SEQ_NUM"]*config.MSS)
+
+                    congestionState = 1
+                    ssthresh = int(cwnd)/2
+                    if ssthresh<=0:
+                        ssthresh = 1
+                    cwnd = 1 
+                    print("阈值更新为: ",ssthresh)
+                    print("cwnd窗口大小更新为: ",cwnd)
+                    # sendAvaliable = True
+                    # receiveACK = True
                 # print("Send empty packet to update flow control value.")
-                print("发送空包等待更新rwnd")
-                GBNtimer = time.time()
-                # 发送空包等到接收方将更新后的rwnd返回
-                send_sock.sendto(dict2bits({}),cli_addr)
-                sendNotAck = nextseqnum - base 
-                # 可以继续发送
-                if sendNotAck <= rwnd:
-                    sendAvaliable = True
-                    receiveACK = True
+                else:
+                    print("发送空包等待更新rwnd")
+                    GBNtimer = time.time()
+                    # 发送空包等到接收方将更新后的rwnd返回
+                    send_sock.sendto(dict2bits({}),cli_addr)
+                    sendNotAck = nextseqnum - base 
+                    # 可以继续发送
+                    if sendNotAck <= rwnd:
+                        print("rwnd窗口大小更新为: ",rwnd)
+                        sendAvaliable = True
+                        receiveACK = True
             
     #关闭接受端与客户端
     send_sock.sendto(dict2bits({"FIN":b'1'}),cli_addr)

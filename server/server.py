@@ -8,17 +8,19 @@ import json
 import queue
 import threading
 import time
+import config 
 
 # 默认选项
 # 连接端口
-SER_PORT = 10000
-SER_IP = "127.0.0.1"
-SER_ADDR = (SER_IP,SER_PORT)
-BUFSIZE = 1024 
+SER_PORT = config.SER_PORT
+SER_IP = config.SER_IP
+SER_ADDR = config.SER_ADDR
+BUFSIZE = config.BUFSIZE
 # 传输端口
-APP_PORT = 20000
-OPERATION = "lget"
-FILENAME = "test.mp4"
+APP_PORT = config.APP_PORT
+OPERATION = config.OPERATION
+FILENAME = config.FILENAME
+SER_RECV_BUF = config.SER_RECV_BUF
 
 # 服务端监听请求连接的套接字
 recv_sock = socket(AF_INET, SOCK_DGRAM)
@@ -46,7 +48,7 @@ while serverListend:
         # 客户端缓存
         RecvBuffer = packet["recvWindow"]
         # print("CLIENT REQUEST:filename,operation,RecvBuffer:\n",FILENAME,OPERATION,RecvBuffer)
-        print("客户端选项为: 文件名 操作 缓存大小 \n",FILENAME,OPERATION,RecvBuffer)
+        print("客户端选项为:\n 文件名 操作 缓存大小 \n",FILENAME,OPERATION,RecvBuffer)
 
         # 返回服务端进行数据传送新的可用端口，不同于第一次连接的端口，每次请求返回的端口号确保不同
         replyPort = bytes(json.dumps({"replyPort":APP_PORT}),encoding = 'utf-8')
@@ -69,7 +71,7 @@ while serverListend:
         # 子线程处理上传请求
         elif OPERATION == "lsend":
             # 文件接收方的线程
-            receiver_thread = threading.Thread(target = fileReceiver,args = (APP_PORT,(address[0],address[1]),FILENAME,RecvBuffer,))
+            receiver_thread = threading.Thread(target = fileReceiver,args = (APP_PORT,(address[0],address[1]),FILENAME,SER_RECV_BUF,))
             # 更新新的端口处理其他请求
             APP_PORT += 1
             receiver_thread.start()

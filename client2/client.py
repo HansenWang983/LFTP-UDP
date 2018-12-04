@@ -6,15 +6,16 @@ sys.path.append('../')
 from utility import *
 import json
 import threading
+import config
 
 # 默认选项
-SER_PORT = 10000
-SER_IP = "127.0.0.1"
-FILENAME = "test.mp4"
-OPERATION = "lsend"
-RecvBuffer = 1000
-CLI_PORT = 30002
-BUFSIZE = 1024 
+SER_PORT = config.SER_PORT
+SER_IP = config.SER_IP
+OPERATION = 'lsend'
+FILENAME = config.FILENAME
+RecvBuffer = config.RecvBuffer
+CLI_PORT = config.CLI_PORT + 2
+BUFSIZE = config.BUFSIZE
 
 if __name__ == '__main__':
     if len(sys.argv)>=4:
@@ -68,7 +69,7 @@ if __name__ == '__main__':
         recv_thread = threading.Thread(target = TransferReceiver,args = (CLI_PORT,transferQueue,))
         # 发送方发送文件内容的线程
         # 参数：发送方发送端口，接收方接收端口
-        send_thread = threading.Thread(target = TransferSender,args = (CLI_PORT+1,transferQueue,FILENAME,(address[0],replyPort),RecvBuffer,))
+        send_thread = threading.Thread(target = TransferSender,args = (CLI_PORT+1,transferQueue,FILENAME,(address[0],replyPort),config.SER_RECV_BUF,))
         recv_thread.start()
         send_thread.start()
         recv_thread.join()

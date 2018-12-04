@@ -327,6 +327,8 @@ Python的Queue模块提供一种适用于多线程编程的FIFO实现。它可�
 
 
 
+**具体用于流量控制**
+
 可以通过一个空的时间队列控制数据接收端文件写入的速度，将收到的数据首先存入缓存中，每隔一段时间get空的时间队列，抛出empty异常，然后将缓存中的数据写入文件中：
 
 ```python
@@ -480,7 +482,7 @@ receiver的FSM
 
 2. 如前所述，接收方通过控制文件写入速度，记录当前写入的seq序号为LastByteRead，并根据按序收到的seq序号更新LastByteRcvd，并根据事先设置的接收缓存大小计算rwnd，每次将rwnd随ack序号一起返回给发送方。
 
-
+**具体见上面使用queue进行通信的内容**
 
 ### 七、拥塞控制
 
@@ -515,9 +517,25 @@ def TransferReceiver(port,receiveQueue):
 
 每一轮发送端会发送尽可能多的数据包直到超过min{rwnd,cwnd}，然后开始从receiveQueue中按照GBN的逻辑接受ack，其中有三种情况：
 
-1. 按序到达（ack==base），更新base加1，更新计时器，更新上一个ack的值，如果ack为本轮发送的数据包中最后一个（判断base是否等于nextseqnum），说明此回合未发生冗余ack和超时的情况，判断是慢启动还是拥塞避免阶段，进行乘性或者线性增加cwnd。**注意如果是因为超过rwnd引起的，则在收到本轮全部ack后不增加cwnd值。**
-2. 收到3个冗余的ack包，进入快速恢复状态，慢启动阈值设置为cwnd的一半（向下取整数），cwnd为更新后的阈值加3，并进入线性增长阶段，然后进行重传。
+1. 按序到达（ack==base），更新base加1，更新计时器，更新上一个ack的值，如果ack为本轮发送的数据包中最后一个（判断base是否等于nextseqnum），说明此回合未发生冗余ack和超时的情况，判断是慢启动还是拥塞避免阶段，进行乘性或者线性增加cwnd。**注意如果是因为超过rwnd引起的，则在收到本轮全部ack后不增加cwnd值。**然后重新进入下一轮发送数据包的循环。
+2. 收到3个冗余的ack包，进入快速恢复状态，慢启动阈值设置为cwnd的一半（向下取整数），cwnd为更新后的阈值加3，并进入线性增长状态，然后进行重传，注意此时不需要进入下一轮发送，而是不断从队列中继续接收ack，直到重传的ack全部按序收到，才可以开始下一轮循环。
 3. 如果收到的ack大于当前base，说明之前的包发生丢失，会发生超时情况，此时更新计时器，并进行重传，然后将cwnd置为1，慢启动阈值设置为cwnd的一半（向下取整数），并重新进入慢启动状态。
+
+
+
+通过两个循环完成，第一个循环负责根据cwnd和rwnd的大小发送数据包，并记录已发没收到ACK的包的数量，当其未满足拥塞控制和流量控制的条件时，终止循环，并进入第二个循环。
+
+第二个循环负责从共享队列中接收返回的ack，如果按序到达，则不断更新base值，直到本轮发送的所有数据包确认收到后终止循环，重新进入发送的循环中。
+
+如果收到3个冗余的ack，说明接收方未收到期待的数据包，即在发送数据包途中发生丢失，则根据快速恢复状态更新cwnd和阈值的大小，并进行重传，此时不跳出循环。
+
+如果收到的ack大于base值，说明在返回ack的途中发生丢包，触发超时响应，进行重传并更新cwnd和阈值的大小，此时也不用跳出循环。
+
+综上所述，第二个循环只有在本轮数据包全部确认收到后才终止循环并开始下一轮的发送。
+
+如果共享队列为空，则表示收到的ack包少于发送的数据包，说明超时，需要注意的是，还可能是由于rwnd的大小引起的，需要发送空包以更新rwnd值。
+
+r
 
 ```python
 # 发送端发送数据线程
@@ -593,7 +611,7 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                 data = f.read(MSS)
                 # 文件读入完毕
                 if data == b'':
-                    print("File read end.")
+                    print("文件已经读到末尾，结束.")
                     sendAvaliable = False
                     sendContinue = False
                     break
@@ -604,7 +622,7 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
        
 ```
 
-接收ack的循环，通过共享队列
+通过共享队列，循环接收ack
 
 ```python
 # 等待接收ACK
@@ -660,7 +678,9 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                         cwnd = ssthresh + 3
                         dupACKcount = 0
                         congestionState = 2
-                        print("Three times duplicated ACK",previousACK*500," ,resend now!")
+                       	print("收到3次冗余的ACK",previousACK*1," ,进行重传!")
+                        print("阈值更新为: ",ssthresh)
+                        print("cwnd窗口大小更新为: ",cwnd)
                         # 进入重传
                         for i in range(base,nextseqnum):
                             packet = cache[i]
@@ -685,18 +705,47 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
                     if ssthresh<=0:
                         ssthresh = 1
                     cwnd = 1
+                    print("阈值更新为: ",ssthresh)
+                    print("cwnd窗口大小更新为: ",cwnd)
         
-            # 超过rwnd大小引起的超时
-            except queue.Empty:  
-                print("Send empty packet to update flow control value.")
-                GBNtimer = time.time()
-                # 发送空包等到接收方将更新后的rwnd返回
-                send_sock.sendto(dict2bits({}),cli_addr)
-                sendNotAck = nextseqnum - base 
-                # 可以继续发送
-                if sendNotAck <= rwnd:
-                    sendAvaliable = True
-                    receiveACK = True
+           	# ack队列为空，说明超时
+            except queue.Empty: 
+                # 没收到响应的ack，拥塞控制引起
+                if not ClientBlock:
+                    # print("Time out and output current sequence number",base)
+                    print("超时,当前base为: ",base)
+                    # 重启计时器
+                    GBNtimer = time.time()
+                    # 重传base到nextseqnum
+                    for i in range(base,nextseqnum):
+                        packet = cache[i]
+                        send_sock.sendto(cache[i],cli_addr)
+                        # print("Resend packet SEQ:",bits2dict(packet)["SEQ_NUM"]*1)
+                        print("重传的字节序号为: ",bits2dict(packet)["SEQ_NUM"]*1)
+
+                    congestionState = 1
+                    ssthresh = int(cwnd)/2
+                    if ssthresh<=0:
+                        ssthresh = 1
+                    cwnd = 1 
+                    print("阈值更新为: ",ssthresh)
+                    print("cwnd窗口大小更新为: ",cwnd)
+                    # sendAvaliable = True
+                    # receiveACK = True
+                    
+                # print("Send empty packet to update flow control value.")
+                # 流量控制引起的超时
+                else:
+                    print("发送空包等待更新rwnd")
+                    GBNtimer = time.time()
+                    # 发送空包等到接收方将更新后的rwnd返回
+                    send_sock.sendto(dict2bits({}),cli_addr)
+                    sendNotAck = nextseqnum - base 
+                    # 可以继续发送
+                    if sendNotAck <= rwnd:
+                        print("rwnd窗口大小更新为: ",rwnd)
+                        sendAvaliable = True
+                        receiveACK = True
 ```
 
 最后主动向接收端发送终止连接信息
@@ -713,6 +762,181 @@ def TransferSender(port,receiveQueue,filename,cli_addr,rwnd):
 
 
 ## 测试结果
+
+1. CS架构
+
+2. 客户端可以上传或者下载大文件：
+
+   LFTP lsend myserver mylargefile
+
+   LFTP lget myserver mylargefile
+
+   **myserver can be a url address or an IP address.**
+
+3. 使用无连接传输的UDP协议，并达到和TCP一样的100%可靠运输
+
+4. 流控制和拥塞控制
+
+5. 具有多路复用和多路分解的功能，即支持多用户同时上传或者下载
+
+6. 提示有意义的调试信息
+
+
+
+在进行公网测试的时候，将服务端运行在远程服务器，本地主机在校园的局域网中执行客户端程序后，服务端可以收到本地主机发起的请求，由于处于内网中，会得到一个经过NAT转换的外网IP和端口，但服务端返回请求给客户端的时候，主机收不到，不知是否因为NAT穿透的问题，故先在本地进行测试，并通过在文件发送方的接收端随机丢包模拟真实网络环境。
+
+
+
+### 一、流量控制
+
+使用test.txt文件测试流量控制
+
+首先进入server 文件夹执行`python server.py`，默认接受连接的端口为10000，返回给客户端可用的数据传输端口从20000开始，socket每次收到BUFSIZE（1024B）大小的数据。
+
+进入client文件夹使用`python client.py lget 127.0.0.1 test.txt`执行第一个客户的客户端程序，缺省参数为`lget 127.0.0.1 test.txt`
+
+可以进入config.py中进行相关变量的修改
+
+```python
+# 服务端地址
+SER_PORT = 10000
+SER_IP = "127.0.0.1"
+SER_ADDR = (SER_IP,SER_PORT)
+
+# socket最大传输的数据包长度
+BUFSIZE = 1024 
+# 服务端返回可用的端口起始值
+APP_PORT = 20000
+# 客户端发送请求的端口
+CLI_PORT = 30000
+
+# 默认参数
+OPERATION = "lget"
+FILENAME = "test.txt"
+
+# 客户端缓存大小
+RecvBuffer = 10
+# 服务端缓存大小
+SER_RECV_BUF = 100
+
+# 硬盘写操作时间间隔
+FileWriteInterval = 0.5
+
+# 发送报文数据字段最大字节长度
+MSS = 1
+# 发送方最大等待时延
+senderTimeoutValue = 1
+# 拥塞窗口大小
+cwnd = 1
+# 慢启动阈值
+ssthresh = 10
+```
+
+![8](Assets/8.jpg)
+
+
+
+将客户端的缓存大小设置为10，最大报文长度MSS设为1字节，发送方最大等待时延senderTimeoutValue设为1s，每隔0.5s进行一次文件写操作。
+
+![8](Assets/9.jpg)
+
+如上所示，客户端和服务端建立连接，服务端收到用户具体选项和用户的缓存大小并返回可用端口进行连接。
+
+
+
+在本地测试由于没有丢包情况，并且ack都是按序到达，不存在之后发送的先于前面的到达，所以返回的ack和发送的seq相同
+
+![8](Assets/10.jpg)
+
+如上所示是服务端的提示信息，由于ssthresh设置为10，所以cwnd会一直乘性增长，但是rwnd会逐渐减少直到为0时终止本轮发送，此时发送空包以更新rwnd值，客户端由于未收到期待的seq，所以会不断发送ack为10的数据包，而当客户端写入第一轮数据后，更新rwnd值，并通知服务端开始下一轮的发送。
+
+![8](Assets/11.jpg)
+
+客户端返回的提示信息，中间收到两个空包。
+
+
+
+![8](Assets/12.jpg)
+
+左侧为客户端 ，右侧为服务端。当服务端读到文件末尾时，会主动发送FIN为1的字段通知客户端关闭，然后客户端在收到FIN后关闭套接字和文件。
+
+**由于rwnd设置较小，此时限制发送方发送速度的主要是流量控制**
+
+
+
+### 二、拥塞控制
+
+使用test.txt文件测试拥塞控制
+
+由于测试文件大小为80字节，将客户端缓存设置为100，不受流量控制限制，数据包大小为1字节，慢启动阈值为10个数据包。
+
+![8](Assets/13.jpg)
+
+在正常未丢包的情况下服务端的结果
+
+![8](Assets/14.jpg)
+
+![8](Assets/15.jpg)
+
+可以发现，在cwnd小于ssthresh的情况下，会指数增长，直到达到或超过ssthresh后从cwnd=ssthresh开始进入拥塞避免阶段，然后开始线性增加。
+
+
+
+参数不变，随机丢失收到的ack包进行测试
+
+![8](Assets/16.jpg)
+
+左侧为客户端 ，右侧为服务端。
+
+
+
+文件接受方第一次将收到的seq：5丢弃，然后发送ack：4，由于之前未发生丢包情况，cwnd一直处于慢启动状态，当收到3个冗余的ACK后，更新阈值为当前cwnd的一半为2，下一轮的cwnd更新为阈值+3为5，并进入拥塞控制阶段，更新计时器，然后重传当前发送缓存窗口中的数据包5-7
+
+第二次重传的5号数据包在文件接受方再一次被丢弃，然后继续返回ack：4，因为重传得到的ack不是期望的序号，这次在服务端发生超时情况，立即进行重传，并更新阈值为2.5和cwnd大小为1，重新进入慢启动阶段直到大于2.5。
+
+
+
+### 三、并发请求
+
+将测试文件改为test.mp4，大小为28MB，更改一些参数如下：
+
+![8](Assets/17.jpg)
+
+
+
+首先还是测试不丢包的情况
+
+1. 同时运行client和client2中的client.py进行下载
+
+![8](Assets/18.jpg)
+
+![8](Assets/19.jpg)
+
+从左到右：客户端1，客户端2，服务端
+
+由于未发生丢包情况，其中收到一些空包用于更新rwnd
+
+
+
+2. 将收到的文件重命名同时上传给服务端
+
+详见录屏：https://pan.baidu.com/s/12bsexuelBngK1PXM2iwXhg
+
+![8](Assets/20.jpg)
+
+![8](Assets/21.jpg)
+
+
+
+3. 一个客户端进行下载，一个客户端进行上传
+
+详见录屏：
+
+
+
+
+
+
 
 
 
